@@ -68,7 +68,7 @@ NTSTATUS generate_private_key(byte buf[static PRIVKEY_LEN]) {
 }
 
 void print_address_info(const char* b58check_address, const byte privkey[static PRIVKEY_LEN], unsigned long long count) {
-    printf("Address: %s\nPrivate Key: ", b58check_address);
+    printf("\nAddress: %s\nPrivate Key: ", b58check_address);
     print_hex(PRIVKEY_LEN, privkey);
     printf("Count: %llu\n", count);
 }
@@ -100,7 +100,8 @@ bool matches_pattern(const char* address, const char* pattern, bool case_sensiti
 }
 
 bool validate_pattern(const char* pattern) {
-    return strspn(pattern, BASE58_ALPHABET) == strlen(pattern);
+    return strchr("9ABCDEFGHJKLMNPQRSTUVWXYZ", pattern[0])
+        && strspn(pattern, BASE58_ALPHABET) == strlen(pattern);
 }
 
 char* parse_args(int argc, char * argv[], bool* cs) {
@@ -127,7 +128,7 @@ char* parse_args(int argc, char * argv[], bool* cs) {
         } else if (pattern != NULL) {
             error_exit("Only one pattern can be specified.");
         } else if (!validate_pattern(pattern = argv[i])) {
-            error_exit("Pattern must a subset of Base58 alphabet.");
+            error_exit("Pattern must a subset of Base58 alphabet. The first character must be 9 or an uppercase letter.");
         }
     }
 
@@ -149,7 +150,7 @@ int main(int argc, char* argv[]) {
     unsigned long long count = 0;
     char b58check_address[B58CHECK_ADDRESS_LEN + 1];
 
-    while (!matches_pattern(b58check_address, pattern, case_sensitive)) {
+    do {
         count++;
 
         if (!BCRYPT_SUCCESS(generate_private_key(privkey))) {
@@ -162,10 +163,10 @@ int main(int argc, char* argv[]) {
 
         base58check(address, ADDRESS_LEN, b58check_address, B58CHECK_ADDRESS_LEN);
 
-        if (count % 100000 == 0) {
-            printf("%llu wallets checked\r", count);
+        if (count % 50000 == 0) {
+            printf("\r%llu wallets checked", count);
         }
-    };
+    } while (!matches_pattern(b58check_address, pattern, case_sensitive));
 
     print_address_info(b58check_address, privkey, count);
 
