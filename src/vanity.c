@@ -8,16 +8,18 @@
 #include "Keccak.c"
 #include "base58check.c"
 
-#define PRIVKEY_LEN 32
-#define PUBKEY_LEN 65
-#define ADDRESS_LEN 21
-#define B58CHECK_ADDRESS_LEN 34
-#define HELP_TEXT "Usage:\n" \
-                  "  %s [-i] pattern\n" \
-                  "\n" \
-                  "Options:\n" \
-                  "  -i            Case-insensitive search\n" \
-                  "  -h, --help    Print help\n"
+enum {
+    PRIVKEY_LEN = 32,
+    PUBKEY_LEN = 65,
+    ADDRESS_LEN = 21,
+    B58CHECK_ADDRESS_LEN = 34,
+};
+static const char HELP_TEXT[] = "Usage:\n"
+                                "  %s [-i] pattern\n"
+                                "\n"
+                                "Options:\n"
+                                "  -i            Case-insensitive search\n"
+                                "  -h, --help    Print help\n";
 
 secp256k1_context* ctx;
 
@@ -161,7 +163,7 @@ int main(int argc, char* argv[]) {
             error_exit("Error computing public key.");
         }
 
-        base58check(address, ADDRESS_LEN, b58check_address, B58CHECK_ADDRESS_LEN);
+        base58check(ADDRESS_LEN, address, B58CHECK_ADDRESS_LEN, b58check_address);
 
         if (count % 50000 == 0) {
             printf("\r%llu wallets checked", count);

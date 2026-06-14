@@ -1,51 +1,64 @@
 #include <stdint.h>
 #include <string.h>
 
-void sha256(size_t data_len, const uint8_t data[data_len], uint8_t out[static 32]) {
+void sha256(size_t data_len, const uint8_t data[static data_len], uint8_t out[static 32]) {
+    #define WRITE_SHA_LEN(i) block[63 - i] = (uint8_t)(bit_len >> (i * 8));
+
+    #define ROTR32(x, n) (((0U + (x)) << (32 - (n))) | ((x) >> (n))) // Assume x is uint32_t and 0 < n < 32
+
+    #define LOAD_SCHEDULE(i) \
+        schedule[i] = (uint32_t)block[i * 4 + 0] << 24 \
+                    | (uint32_t)block[i * 4 + 1] << 16 \
+                    | (uint32_t)block[i * 4 + 2] <<  8 \
+                    | (uint32_t)block[i * 4 + 3];
+
+    #define SCHEDULE(i) \
+        schedule[i] = 0U + schedule[i - 16] + schedule[i - 7] \
+            + (ROTR32(schedule[i - 15], 7) ^ ROTR32(schedule[i - 15], 18) ^ (schedule[i - 15] >> 3)) \
+            + (ROTR32(schedule[i - 2], 17) ^ ROTR32(schedule[i - 2], 19) ^ (schedule[i - 2] >> 10));
+
+    #define ROUND(a, b, c, d, e, f, g, h, i, k) \
+        h = 0U + h + (ROTR32(e, 6) ^ ROTR32(e, 11) ^ ROTR32(e, 25)) + (g ^ (e & (f ^ g))) + UINT32_C(k) + schedule[i]; \
+        d = 0U + d + h; \
+        h = 0U + h + (ROTR32(a, 2) ^ ROTR32(a, 13) ^ ROTR32(a, 22)) + ((a & (b | c)) | (b & c));
+
+    #define WRITE_STATE_BYTES(i) \
+        out[i * 4 + 0] = state[i] >> 24; \
+        out[i * 4 + 1] = state[i] >> 16; \
+        out[i * 4 + 2] = state[i] >>  8; \
+        out[i * 4 + 3] = state[i];
+
     uint8_t block[64] = {0};
     memcpy(block, data, data_len);
     block[data_len] = 0x80;
 
     const uint64_t bit_len = (uint64_t)data_len * 8;
-    for (size_t i = 0; i < 8; i++) {
-        block[63 - i] = (uint8_t)(bit_len >> (i * 8));
-    }
-
-    #define ROTR32(x, n)  (((0U + (x)) << (32 - (n))) | ((x) >> (n)))  // Assumes that x is uint32_t and 0 < n < 32
-
-    #define LOADSCHEDULE(i)  \
-        schedule[i] = (uint32_t)block[i * 4 + 0] << 24  \
-                    | (uint32_t)block[i * 4 + 1] << 16  \
-                    | (uint32_t)block[i * 4 + 2] <<  8  \
-                    | (uint32_t)block[i * 4 + 3] <<  0;
-
-    #define SCHEDULE(i)  \
-        schedule[i] = 0U + schedule[i - 16] + schedule[i - 7]  \
-            + (ROTR32(schedule[i - 15], 7) ^ ROTR32(schedule[i - 15], 18) ^ (schedule[i - 15] >> 3))  \
-            + (ROTR32(schedule[i - 2], 17) ^ ROTR32(schedule[i - 2], 19) ^ (schedule[i - 2] >> 10));
-
-    #define ROUND(a, b, c, d, e, f, g, h, i, k) \
-        h = 0U + h + (ROTR32(e, 6) ^ ROTR32(e, 11) ^ ROTR32(e, 25)) + (g ^ (e & (f ^ g))) + UINT32_C(k) + schedule[i];  \
-        d = 0U + d + h;  \
-        h = 0U + h + (ROTR32(a, 2) ^ ROTR32(a, 13) ^ ROTR32(a, 22)) + ((a & (b | c)) | (b & c));
+    WRITE_SHA_LEN(0)
+    WRITE_SHA_LEN(1)
+    WRITE_SHA_LEN(2)
+    WRITE_SHA_LEN(3)
+    WRITE_SHA_LEN(4)
+    WRITE_SHA_LEN(5)
+    WRITE_SHA_LEN(6)
+    WRITE_SHA_LEN(7)
 
     uint32_t schedule[64];
-    LOADSCHEDULE( 0)
-    LOADSCHEDULE( 1)
-    LOADSCHEDULE( 2)
-    LOADSCHEDULE( 3)
-    LOADSCHEDULE( 4)
-    LOADSCHEDULE( 5)
-    LOADSCHEDULE( 6)
-    LOADSCHEDULE( 7)
-    LOADSCHEDULE( 8)
-    LOADSCHEDULE( 9)
-    LOADSCHEDULE(10)
-    LOADSCHEDULE(11)
-    LOADSCHEDULE(12)
-    LOADSCHEDULE(13)
-    LOADSCHEDULE(14)
-    LOADSCHEDULE(15)
+    LOAD_SCHEDULE( 0)
+    LOAD_SCHEDULE( 1)
+    LOAD_SCHEDULE( 2)
+    LOAD_SCHEDULE( 3)
+    LOAD_SCHEDULE( 4)
+    LOAD_SCHEDULE( 5)
+    LOAD_SCHEDULE( 6)
+    LOAD_SCHEDULE( 7)
+    LOAD_SCHEDULE( 8)
+    LOAD_SCHEDULE( 9)
+    LOAD_SCHEDULE(10)
+    LOAD_SCHEDULE(11)
+    LOAD_SCHEDULE(12)
+    LOAD_SCHEDULE(13)
+    LOAD_SCHEDULE(14)
+    LOAD_SCHEDULE(15)
     SCHEDULE(16)
     SCHEDULE(17)
     SCHEDULE(18)
@@ -180,15 +193,18 @@ void sha256(size_t data_len, const uint8_t data[data_len], uint8_t out[static 32
     state[6] = 0U + state[6] + g;
     state[7] = 0U + state[7] + h;
 
+    WRITE_STATE_BYTES(0)
+    WRITE_STATE_BYTES(1)
+    WRITE_STATE_BYTES(2)
+    WRITE_STATE_BYTES(3)
+    WRITE_STATE_BYTES(4)
+    WRITE_STATE_BYTES(5)
+    WRITE_STATE_BYTES(6)
+    WRITE_STATE_BYTES(7)
+
     #undef ROTR32
-    #undef LOADSCHEDULE
+    #undef LOAD_SCHEDULE
     #undef SCHEDULE
     #undef ROUND
-
-    for (size_t i = 0; i < 8; i++) {
-        out[i*4+0] = state[i] >> 24;
-        out[i*4+1] = state[i] >> 16;
-        out[i*4+2] = state[i] >>  8;
-        out[i*4+3] = state[i];
-    }
+    #undef WRITE_STATE_BYTES
 }
