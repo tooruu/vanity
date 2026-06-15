@@ -4,6 +4,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <process.h>
 #include <secp256k1.h>
 #include "Keccak.c"
 #include "base58check.c"
@@ -36,33 +38,13 @@ void print_hex(size_t len, const uint8_t data[static len]) {
     putchar('\n');
 }
 
-bool privkey_to_pubkey_bytes(const uint8_t privkey[static PRIVKEY_LEN], uint8_t pubkey[static PUBKEY_LEN]) {
-    secp256k1_pubkey pub;
-
-    if (!secp256k1_ec_pubkey_create(ctx, &pub, privkey)) {
-        return false;
-    }
-
-    static size_t pubkey_len = PUBKEY_LEN;
-    secp256k1_ec_pubkey_serialize(ctx, pubkey, &pubkey_len, &pub, SECP256K1_EC_UNCOMPRESSED);
-    return true;
-}
-
-bool privkey_to_pubkey(const uint8_t privkey[static PRIVKEY_LEN], secp256k1_pubkey *out_pub) {
+bool privkey_to_pubkey(const uint8_t privkey[static PRIVKEY_LEN], secp256k1_pubkey* out_pub) {
     return secp256k1_ec_pubkey_create(ctx, out_pub, privkey);
 }
 
-bool increment_pubkey(secp256k1_pubkey *pub) {
-    static const unsigned char tweak[32] = { [31] = 1 };
+bool increment_pubkey(secp256k1_pubkey* pub) {
+    static const uint8_t tweak[32] = { [31] = 1 };
     return secp256k1_ec_pubkey_tweak_add(ctx, pub, tweak);
-}
-
-void pubkey_bytes_to_tron_address(const uint8_t pubkey[static PUBKEY_LEN], uint8_t address[static ADDRESS_LEN]) {
-    uint8_t hash[32];
-    Keccak_256(pubkey + 1, PUBKEY_LEN - 1, hash);
-
-    address[0] = 0x41;
-    memcpy(address + 1, hash + 12, 20);
 }
 
 void pubkey_to_tron_address(const secp256k1_pubkey* pub, uint8_t address[static ADDRESS_LEN]) {
@@ -77,20 +59,11 @@ void pubkey_to_tron_address(const secp256k1_pubkey* pub, uint8_t address[static 
     memcpy(address + 1, hash + 12, 20);
 }
 
-void pubkey_to_b58check_address(const secp256k1_pubkey* pub, char address[static B58CHECK_ADDRESS_LEN]) {
+void pubkey_to_b58check_address(const secp256k1_pubkey* pub, char address[static B58CHECK_ADDRESS_LEN + 1]) {
     uint8_t tron_address[ADDRESS_LEN];
     pubkey_to_tron_address(pub, tron_address);
     base58check(ADDRESS_LEN, tron_address, B58CHECK_ADDRESS_LEN, address);
-}
-
-bool privkey_to_tron_address(const uint8_t privkey[static PRIVKEY_LEN], uint8_t address[static ADDRESS_LEN]) {
-    uint8_t pubkey[PUBKEY_LEN];
-    if (!privkey_to_pubkey_bytes(privkey, pubkey)) {
-        return false;
-    }
-
-    pubkey_bytes_to_tron_address(pubkey, address);
-    return true;
+    address[B58CHECK_ADDRESS_LEN] = 0;
 }
 
 bool generate_private_key(uint8_t buf[static PRIVKEY_LEN]) {
@@ -121,7 +94,6 @@ bool matches_pattern(const char* address, const char* pattern, bool case_sensiti
         }
 
         if (addr_char != pat_char) return false;
-
         addr_pos++;
         pat_pos++;
     }
@@ -134,7 +106,7 @@ bool validate_pattern(const char* pattern) {
         && strspn(pattern, BASE58_ALPHABET) == strlen(pattern);
 }
 
-char* parse_args(int argc, char * argv[], bool* cs) {
+char* parse_args(int argc, char* argv[], bool* cs) {
     if (argc > 3) {
         error_exit("Too many arguments.");
     }
@@ -158,7 +130,7 @@ char* parse_args(int argc, char * argv[], bool* cs) {
         } else if (pattern != NULL) {
             error_exit("Only one pattern can be specified.");
         } else if (!validate_pattern(pattern = argv[i])) {
-            error_exit("Pattern must a subset of Base58 alphabet. The first character must be 9 or an uppercase letter.");
+            error_exit("Pattern must be a subset of Base58 alphabet. The first character must be 9 or an uppercase letter.");
         }
     }
 
@@ -169,61 +141,121 @@ char* parse_args(int argc, char * argv[], bool* cs) {
     return pattern;
 }
 
+bool reconstruct_privkey(uint8_t privkey[static PRIVKEY_LEN], unsigned long long num_increments) {
+    if (num_increments == 0) return true;
+    const uint8_t tweak[32] = {
+        [24] = (num_increments >> 56) & 0xFF,
+        [25] = (num_increments >> 48) & 0xFF,
+        [26] = (num_increments >> 40) & 0xFF,
+        [27] = (num_increments >> 32) & 0xFF,
+        [28] = (num_increments >> 24) & 0xFF,
+        [29] = (num_increments >> 16) & 0xFF,
+        [30] = (num_increments >>  8) & 0xFF,
+        [31] =  num_increments        & 0xFF,
+    };
+    return secp256k1_ec_seckey_tweak_add(ctx, privkey, tweak);
+}
+
+typedef struct {
+    const char* pattern;
+    bool case_sensitive;
+    atomic_ullong* total_count;
+    atomic_bool* found;
+    bool did_find;
+    uint8_t privkey[PRIVKEY_LEN];
+    char b58check_address[B58CHECK_ADDRESS_LEN + 1];
+} ThreadData;
+
+unsigned __stdcall worker(void* arg) {
+    ThreadData* td = (ThreadData*)arg;
+
+    uint8_t start_privkey[PRIVKEY_LEN];
+    if (!generate_private_key(start_privkey)) return false;
+
+    secp256k1_pubkey pub;
+    if (!privkey_to_pubkey(start_privkey, &pub)) return false;
+
+    char b58check_address[B58CHECK_ADDRESS_LEN + 1];
+    pubkey_to_b58check_address(&pub, b58check_address);
+
+    unsigned long long local_count = 0;
+    unsigned long long batch = 0;
+
+    while (!atomic_load_explicit(td->found, memory_order_relaxed)) {
+        local_count++;
+        batch++;
+
+        if (matches_pattern(b58check_address, td->pattern, td->case_sensitive)) {
+            bool expected = false;
+            if (atomic_compare_exchange_strong(td->found, &expected, true)) {
+                uint8_t privkey[PRIVKEY_LEN];
+                memcpy(privkey, start_privkey, PRIVKEY_LEN);
+                reconstruct_privkey(privkey, local_count - 1);
+                memcpy(td->privkey, privkey, PRIVKEY_LEN);
+                memcpy(td->b58check_address, b58check_address, B58CHECK_ADDRESS_LEN + 1);
+                td->did_find = true;
+            }
+            break;
+        }
+
+        if (!increment_pubkey(&pub)) {
+            if (!generate_private_key(start_privkey)) return false;
+            if (!privkey_to_pubkey(start_privkey, &pub)) return false;
+            local_count = 0;
+        }
+
+        pubkey_to_b58check_address(&pub, b58check_address);
+
+        if (batch == 65536) {
+            atomic_fetch_add(td->total_count, batch);
+            batch = 0;
+        }
+    }
+
+    atomic_fetch_add(td->total_count, batch);
+    return true;
+}
 
 int main(int argc, char* argv[]) {
     bool case_sensitive;
     char* pattern = parse_args(argc, argv, &case_sensitive);
 
-    uint8_t privkey[PRIVKEY_LEN];
-    if (!generate_private_key(privkey)) {
-        error_exit("Error generating private key.");
-    }
-
     ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
 
-    secp256k1_pubkey pub;
-    if (!privkey_to_pubkey(privkey, &pub)) {
-        error_exit("Error computing public key.");
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    DWORD num_threads = sysinfo.dwNumberOfProcessors;
+
+    atomic_ullong total_count = 0;
+    atomic_bool found = false;
+
+    ThreadData* td = calloc(num_threads, sizeof(ThreadData));
+    HANDLE* threads = malloc(num_threads * sizeof(HANDLE));
+
+    for (DWORD i = 0; i < num_threads; i++) {
+        td[i].pattern = pattern;
+        td[i].case_sensitive = case_sensitive;
+        td[i].total_count = &total_count;
+        td[i].found = &found;
+        threads[i] = (HANDLE)_beginthreadex(NULL, 0, worker, &td[i], 0, NULL);
     }
 
-    char b58check_address[B58CHECK_ADDRESS_LEN + 1];
-    pubkey_to_b58check_address(&pub, b58check_address);
-    b58check_address[B58CHECK_ADDRESS_LEN] = 0;
-
-    unsigned long long count = 1;
-    while (!matches_pattern(b58check_address, pattern, case_sensitive)) {
-        count++;
-
-        if (!increment_pubkey(&pub)) {
-            error_exit("Error computing public key.");
-        }
-
-        pubkey_to_b58check_address(&pub, b58check_address);
-
-        if ((count & 0xFFFF) == 0) {
-            printf("\r%llu addresses checked", count);
-        }
+    while (!atomic_load(&found)) {
+        Sleep(100);
+        printf("\r%llu addresses checked", atomic_load(&total_count));
+        fflush(stdout);
     }
 
-    if (count > 1) {
-        count--;
-        const uint8_t tweak[32] = {
-            [24] = (count >> 56) & 0xFF,
-                   (count >> 48) & 0xFF,
-                   (count >> 40) & 0xFF,
-                   (count >> 32) & 0xFF,
-                   (count >> 24) & 0xFF,
-                   (count >> 16) & 0xFF,
-                   (count >>  8) & 0xFF,
-                   count & 0xFF,
-        };
-        count++;
-        if (!secp256k1_ec_seckey_tweak_add(ctx, privkey, tweak)) {
-            error_exit("Error computing private key.");
+    WaitForMultipleObjects(num_threads, threads, TRUE, INFINITE);
+
+    for (DWORD i = 0; i < num_threads; i++) {
+        CloseHandle(threads[i]);
+        if (td[i].did_find) {
+            print_address_info(td[i].b58check_address, td[i].privkey, atomic_load(&total_count));
         }
     }
 
-    print_address_info(b58check_address, privkey, count);
-
+    free(td);
+    free(threads);
     secp256k1_context_destroy(ctx);
 }
