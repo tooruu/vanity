@@ -93,8 +93,8 @@ bool privkey_to_tron_address(const uint8_t privkey[static PRIVKEY_LEN], uint8_t 
     return true;
 }
 
-NTSTATUS generate_private_key(uint8_t buf[static PRIVKEY_LEN]) {
-    return BCryptGenRandom(NULL, buf, PRIVKEY_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+bool generate_private_key(uint8_t buf[static PRIVKEY_LEN]) {
+    return BCRYPT_SUCCESS(BCryptGenRandom(NULL, buf, PRIVKEY_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG));
 }
 
 void print_address_info(const char* b58check_address, const uint8_t privkey[static PRIVKEY_LEN], unsigned long long count) {
@@ -175,8 +175,8 @@ int main(int argc, char* argv[]) {
     char* pattern = parse_args(argc, argv, &case_sensitive);
 
     uint8_t privkey[PRIVKEY_LEN];
-    if (!BCRYPT_SUCCESS(generate_private_key(privkey))) {
-        error_exit("Failed to generate randomness.");
+    if (!generate_private_key(privkey)) {
+        error_exit("Error generating private key.");
     }
 
     ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
