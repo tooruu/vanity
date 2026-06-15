@@ -29,47 +29,75 @@ void error_exit(const char* message) {
     exit(EXIT_FAILURE);
 }
 
-void print_hex(size_t len, const byte data[static len]) {
+void print_hex(size_t len, const uint8_t data[static len]) {
     for (size_t i = 0; i < len; i++) {
         printf("%02x", data[i]);
     }
     putchar('\n');
 }
 
-bool privkey_to_pubkey(const byte privkey[static PRIVKEY_LEN], byte pubkey[static PUBKEY_LEN]) {
+bool privkey_to_pubkey_bytes(const uint8_t privkey[static PRIVKEY_LEN], uint8_t pubkey[static PUBKEY_LEN]) {
     secp256k1_pubkey pub;
 
     if (!secp256k1_ec_pubkey_create(ctx, &pub, privkey)) {
         return false;
     }
 
-    size_t pubkey_len = PUBKEY_LEN;
+    static size_t pubkey_len = PUBKEY_LEN;
     secp256k1_ec_pubkey_serialize(ctx, pubkey, &pubkey_len, &pub, SECP256K1_EC_UNCOMPRESSED);
     return true;
 }
 
-void pubkey_to_tron_address(const byte pubkey[static PUBKEY_LEN], byte address[static ADDRESS_LEN]) {
-    byte hash[PRIVKEY_LEN];
-    Keccak_256(pubkey + 1, PUBKEY_LEN - 1, hash);
-    address[0] = 0x41;
-    memcpy(address + 1, hash + PRIVKEY_LEN - 20, 20);
+bool privkey_to_pubkey(const uint8_t privkey[static PRIVKEY_LEN], secp256k1_pubkey *out_pub) {
+    return secp256k1_ec_pubkey_create(ctx, out_pub, privkey);
 }
 
-bool privkey_to_tron_address(const byte privkey[static PRIVKEY_LEN], byte address[static ADDRESS_LEN]) {
-    byte pubkey[PUBKEY_LEN];
-    if (!privkey_to_pubkey(privkey, pubkey)) {
+bool increment_pubkey(secp256k1_pubkey *pub) {
+    static const unsigned char tweak[32] = { [31] = 1 };
+    return secp256k1_ec_pubkey_tweak_add(ctx, pub, tweak);
+}
+
+void pubkey_bytes_to_tron_address(const uint8_t pubkey[static PUBKEY_LEN], uint8_t address[static ADDRESS_LEN]) {
+    uint8_t hash[32];
+    Keccak_256(pubkey + 1, PUBKEY_LEN - 1, hash);
+
+    address[0] = 0x41;
+    memcpy(address + 1, hash + 12, 20);
+}
+
+void pubkey_to_tron_address(const secp256k1_pubkey* pub, uint8_t address[static ADDRESS_LEN]) {
+    uint8_t pubkey_bytes[PUBKEY_LEN];
+    size_t pubkey_len = PUBKEY_LEN;
+    secp256k1_ec_pubkey_serialize(ctx, pubkey_bytes, &pubkey_len, pub, SECP256K1_EC_UNCOMPRESSED);
+
+    uint8_t hash[32];
+    Keccak_256(pubkey_bytes + 1, PUBKEY_LEN - 1, hash);
+
+    address[0] = 0x41;
+    memcpy(address + 1, hash + 12, 20);
+}
+
+void pubkey_to_b58check_address(const secp256k1_pubkey* pub, char address[static B58CHECK_ADDRESS_LEN]) {
+    uint8_t tron_address[ADDRESS_LEN];
+    pubkey_to_tron_address(pub, tron_address);
+    base58check(ADDRESS_LEN, tron_address, B58CHECK_ADDRESS_LEN, address);
+}
+
+bool privkey_to_tron_address(const uint8_t privkey[static PRIVKEY_LEN], uint8_t address[static ADDRESS_LEN]) {
+    uint8_t pubkey[PUBKEY_LEN];
+    if (!privkey_to_pubkey_bytes(privkey, pubkey)) {
         return false;
     }
 
-    pubkey_to_tron_address(pubkey, address);
+    pubkey_bytes_to_tron_address(pubkey, address);
     return true;
 }
 
-NTSTATUS generate_private_key(byte buf[static PRIVKEY_LEN]) {
+NTSTATUS generate_private_key(uint8_t buf[static PRIVKEY_LEN]) {
     return BCryptGenRandom(NULL, buf, PRIVKEY_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 }
 
-void print_address_info(const char* b58check_address, const byte privkey[static PRIVKEY_LEN], unsigned long long count) {
+void print_address_info(const char* b58check_address, const uint8_t privkey[static PRIVKEY_LEN], unsigned long long count) {
     printf("\nAddress: %s\nPrivate Key: ", b58check_address);
     print_hex(PRIVKEY_LEN, privkey);
     printf("Count: %llu\n", count);
@@ -146,29 +174,54 @@ int main(int argc, char* argv[]) {
     bool case_sensitive;
     char* pattern = parse_args(argc, argv, &case_sensitive);
 
+    uint8_t privkey[PRIVKEY_LEN];
+    if (!BCRYPT_SUCCESS(generate_private_key(privkey))) {
+        error_exit("Failed to generate randomness.");
+    }
+
     ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-    byte privkey[PRIVKEY_LEN], address[ADDRESS_LEN];
 
-    unsigned long long count = 0;
+    secp256k1_pubkey pub;
+    if (!privkey_to_pubkey(privkey, &pub)) {
+        error_exit("Error computing public key.");
+    }
+
     char b58check_address[B58CHECK_ADDRESS_LEN + 1];
+    pubkey_to_b58check_address(&pub, b58check_address);
+    b58check_address[B58CHECK_ADDRESS_LEN] = 0;
 
-    do {
+    unsigned long long count = 1;
+    while (!matches_pattern(b58check_address, pattern, case_sensitive)) {
         count++;
 
-        if (!BCRYPT_SUCCESS(generate_private_key(privkey))) {
-            error_exit("Failed to generate randomness.");
-        }
-
-        if (!privkey_to_tron_address(privkey, address)) {
+        if (!increment_pubkey(&pub)) {
             error_exit("Error computing public key.");
         }
 
-        base58check(ADDRESS_LEN, address, B58CHECK_ADDRESS_LEN, b58check_address);
+        pubkey_to_b58check_address(&pub, b58check_address);
 
-        if (count % 50000 == 0) {
-            printf("\r%llu wallets checked", count);
+        if ((count & 0xFFFF) == 0) {
+            printf("\r%llu addresses checked", count);
         }
-    } while (!matches_pattern(b58check_address, pattern, case_sensitive));
+    }
+
+    if (count > 1) {
+        count--;
+        const uint8_t tweak[32] = {
+            [24] = (count >> 56) & 0xFF,
+                   (count >> 48) & 0xFF,
+                   (count >> 40) & 0xFF,
+                   (count >> 32) & 0xFF,
+                   (count >> 24) & 0xFF,
+                   (count >> 16) & 0xFF,
+                   (count >>  8) & 0xFF,
+                   count & 0xFF,
+        };
+        count++;
+        if (!secp256k1_ec_seckey_tweak_add(ctx, privkey, tweak)) {
+            error_exit("Error computing private key.");
+        }
+    }
 
     print_address_info(b58check_address, privkey, count);
 
